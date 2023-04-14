@@ -1,11 +1,18 @@
 package edu.wpi.teamR.mapdb;
 
 import edu.wpi.teamR.Configuration;
+import edu.wpi.teamR.ItemNotFoundException;
+import edu.wpi.teamR.csv.CSVParameterException;
+import edu.wpi.teamR.csv.CSVReader;
 import javafx.util.Pair;
 
+import java.io.IOException;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.Queue;
+
+import static edu.wpi.teamR.mapdb.NodeDAO.parseNodes;
 
 public class MapDatabase {
     //    private MapDatabase instance;
@@ -34,10 +41,6 @@ public class MapDatabase {
 //        return instance;
 //    }
 
-    void submitUpdates(Queue<ArrayList<Pair<?, EditType>>> updates) {
-
-    }
-
     public ArrayList<Node> getNodes() throws SQLException {
         return nodeDao.getNodes();
     }
@@ -51,21 +54,10 @@ public class MapDatabase {
     }
 
     public ArrayList<Node> getNodesByType(String type) throws SQLException { //TODO: GET CHECKED
-        PreparedStatement preparedStatement = connection.prepareStatement("SELECT DISTINCT nodeID,xCoord,yCoord,building,floor FROM "+Configuration.getNodeSchemaNameTableName()+" NATURAL JOIN "+Configuration.getMoveSchemaNameTableName()+" NATURAL JOIN "+Configuration.getLocationNameSchemaNameTableName()+" WHERE nodetype=?;");
+        PreparedStatement preparedStatement = connection.prepareStatement("SELECT * FROM "+Configuration.getNodeSchemaNameTableName()+" NATURAL JOIN (SELECT * FROM "+Configuration.getMoveSchemaNameTableName()+" NATURAL JOIN (SELECT longname, MAX(date) as date from "+Configuration.getMoveSchemaNameTableName()+" WHERE date<now() group by longname) as foo) as foo natural join "+Configuration.getLocationNameSchemaNameTableName()+" WHERE nodetype=? ORDER BY nodeID;");
         preparedStatement.setString(1, type);
         ResultSet resultSet = preparedStatement.executeQuery();
-        ArrayList<Node> nodes = new ArrayList<>();
-
-        while (resultSet.next()){
-            int nodeID = resultSet.getInt("nodeid");
-            int xCoord = resultSet.getInt("xCoord");
-            int yCoord = resultSet.getInt("yCoord");
-            String building = resultSet.getString("building");
-            String floor = resultSet.getString("floor");
-
-            nodes.add(new Node(nodeID, xCoord, yCoord, building, floor));
-        }
-        return nodes;
+        return parseNodes(resultSet);
     }
 
     public Node addNode(int xCoord, int yCoord, String floorNum, String building) throws SQLException {
@@ -194,7 +186,7 @@ public class MapDatabase {
     }
 
     public ArrayList<MapLocation> getMapLocationsByFloor(String floor) throws SQLException {
-        PreparedStatement preparedStatement = connection.prepareStatement("SELECT * FROM "+Configuration.getNodeSchemaNameTableName()+" NATURAL JOIN (SELECT * FROM "+Configuration.getMoveSchemaNameTableName()+" NATURAL JOIN (SELECT longname, MAX(date) as date from "+Configuration.getMoveSchemaNameTableName()+" WHERE date<now() group by longname) as foo) as foo natural join "+Configuration.getLocationNameSchemaNameTableName()+" ORDER BY nodeID;");
+        PreparedStatement preparedStatement = connection.prepareStatement("SELECT * FROM "+Configuration.getNodeSchemaNameTableName()+" node LEFT JOIN (SELECT * FROM "+Configuration.getMoveSchemaNameTableName()+" NATURAL JOIN (SELECT longname, MAX(date) as date from "+Configuration.getMoveSchemaNameTableName()+" WHERE date<now() group by longname) as foo) as move on node.nodeid=move.nodeid left join "+Configuration.getLocationNameSchemaNameTableName()+" locationname on move.longname=locationname.longname ORDER BY node.nodeID desc;");
         ResultSet resultSet = preparedStatement.executeQuery();
 
         ArrayList<MapLocation> mapLocations = new ArrayList<>();
@@ -214,13 +206,18 @@ public class MapDatabase {
             currentNode = new Node(nodeID, xCoord, yCoord, floor, building);
             locationName = new LocationName(longName, shortName, nodeType);
 
+            boolean noLocationNameForNode = longName==null && shortName==null && nodeType==null;
             boolean continuingLastNode = lastNode.getNodeID()==nodeID;
             if (continuingLastNode){
-                locationNames.add(locationName);
-            } else{
+                if (!noLocationNameForNode) {
+                    locationNames.add(locationName);
+                }
+            } else {
                 mapLocations.add(new MapLocation(lastNode, locationNames)); //if you've reached the end of the list of locations then you're ready to add it
                 locationNames = new ArrayList<>(); //reset list for the next node
-                locationNames.add(locationName); //add first entry for the next node
+                if (!noLocationNameForNode) {
+                    locationNames.add(locationName); //add first entry for the next node
+                }
             }
 
             lastNode = currentNode;
@@ -228,5 +225,51 @@ public class MapDatabase {
         mapLocations.add(new MapLocation(lastNode, locationNames)); //the last locationName will already have been added
 
         return mapLocations;
+    }
+
+    public ArrayList<? extends MapData> readCSV(String path, Class<? extends MapData> _class) throws IOException, CSVParameterException, SQLException {
+        String[] fullName = _class.getName().split("[.]");
+        String name = fullName[fullName.length - 1];
+        switch (name) {
+            case "Node" -> {
+                CSVReader<Node> reader = new CSVReader<>(path, Node.class);
+                ArrayList<Node> nodes = reader.parseCSV();
+                edgeDao.deleteAllEdges();
+                moveDao.deleteAllMoves();
+                nodeDao.deleteAllNodes();
+                nodeDao.addNodes(nodes);
+                return nodes;
+            }
+            case "Edge" -> {
+                CSVReader<Edge> reader = new CSVReader<>(path, Edge.class);
+                ArrayList<Edge> edges = reader.parseCSV();
+                edgeDao.deleteAllEdges();
+                for (Edge e : edges) {
+                    edgeDao.addEdge(e.getStartNode(), e.getEndNode());
+                }
+                return edges;
+            }
+            case "Move" -> {
+                CSVReader<Move> reader = new CSVReader<>(path, Move.class);
+                ArrayList<Move> moves = reader.parseCSV();
+                moveDao.deleteAllMoves();
+                for (Move m : moves) {
+                    moveDao.addMove(m.getNodeID(), m.getLongName(), m.getMoveDate());
+                }
+                return moves;
+            }
+            case "LocationName" -> {
+                CSVReader<LocationName> reader = new CSVReader<>(path, LocationName.class);
+                ArrayList<LocationName> locs = reader.parseCSV();
+                moveDao.deleteAllMoves();
+                locationNameDao.deleteAllLocationNames();
+                for (LocationName l : locs) {
+                    locationNameDao.addLocationName(l.getLongName(), l.getShortName(), l.getNodeType());
+                }
+                return locs;
+            }
+            default -> throw new IllegalStateException("Unexpected class name: " + _class.getName());
+        }
+        // return null;
     }
 }

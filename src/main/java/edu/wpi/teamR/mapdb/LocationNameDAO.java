@@ -1,6 +1,7 @@
 package edu.wpi.teamR.mapdb;
 
 import edu.wpi.teamR.Configuration;
+import edu.wpi.teamR.ItemNotFoundException;
 
 import java.sql.*;
 import java.util.ArrayList;
@@ -83,7 +84,7 @@ public class LocationNameDAO {
         preparedStatement.setString(2, shortName);
         preparedStatement.setString(3, nodeType);
         preparedStatement.executeUpdate();
-        return null;
+        return new LocationName(longName, shortName, nodeType);
     }
 
     void deleteAllLocationNames() throws SQLException {
